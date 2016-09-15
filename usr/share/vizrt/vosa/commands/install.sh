@@ -97,8 +97,12 @@ function copy_original_image() {
   fi
   img="$image/disk.img"
   kernel="$image/vmlinuz"
+  initrd="$image/initrd"
   cp "$install_config_original_image" "$img"
   cp "$install_config_kernel" "$kernel"
+  if [ ! -z "$install_config_initrd" ] && [ -s "$install_config_initrd" ] ; then
+    cp "$install_config_initrd" "$initrd"
+  fi
 }
 
 function resize_original_image() {
@@ -143,11 +147,12 @@ function create_overlay() {
   else 
     cat >> ${tempdir}/overlay/updates/var/lib/cloud/data/cache/nocloud/user-data <<EOF
 #cloud-config
-manage_etc_hosts: true
+manage_etc_hosts: false
 timezone: ${install_config_timezone}
 apt_update: true
 apt_upgrade: false
 apt_mirror: ${install_config_mirror}
+apt_proxy: ${install_config_proxy}
 EOF
   fi
 
@@ -158,10 +163,13 @@ EOF
   chmod 700 ${tempdir}/overlay/updates/root/.ssh
   mkdir -p ${tempdir}/overlay/updates/home/ubuntu/.ssh
   chmod 700 ${tempdir}/overlay/updates/home/ubuntu/.ssh
-  cp "${image}/id_dsa.pub" "${tempdir}/overlay/updates/home/ubuntu/.ssh/authorized_keys"; exitonerror $? "Unable to install id_dsa.pub" 
-  cp "${image}/id_dsa.pub" "${tempdir}/overlay/updates/root/.ssh/authorized_keys"; exitonerror $? "Unable to install id_dsa.pub for root" 
+  if [ -r "${image}/id_dsa.pub" ] ; then
+    cp "${image}/id_dsa.pub" "${tempdir}/overlay/updates/root/.ssh/authorized_keys"; exitonerror $? "Unable to install id_dsa.pub for root" 
+    cp "${image}/id_dsa.pub" "${tempdir}/overlay/updates/home/ubuntu/.ssh/authorized_keys"; exitonerror $? "Unable to install id_dsa.pub" 
+  fi
   for o in "${install_config_ssh_keys[@]}" ; do
-    cat $o >> ${tempdir}/overlay/updates/home/ubuntu/.ssh/authorized_keys; exitonerror $? "Unable to add authorized key $o" 
+    cat $o >> ${tempdir}/overlay/updates/root/.ssh/authorized_keys; exitonerror $? "Unable to add authorized key $o to root" 
+    cat $o >> ${tempdir}/overlay/updates/home/ubuntu/.ssh/authorized_keys; exitonerror $? "Unable to add authorized key $o to ubuntu" 
   done
 
   chmod 600 ${tempdir}/overlay/updates/root/.ssh/authorized_keys; exitonerror $? "Unable to chmod 600 authorized_keys" 
@@ -169,18 +177,35 @@ EOF
 
   cat > ${tempdir}/overlay/updates.script <<EOF
 # Reset permissions on files created above (might not belong to root etc):
-chown --recursive ubuntu: /home/ubuntu/
+if [ -d /home/ubuntu ] ; then
+  chown --recursive ubuntu: /home/ubuntu/
+fi
 
 # Remove DHCP defaults
-perl -pi -e 's/iface eth0.*//' /etc/network/interfaces
-
-# Add static IP configuration
-cat >> /etc/network/interfaces <<END
+if [ -r /etc/network/interfaces ] ; then
+  perl -pi -e 's/iface eth0.*//' /etc/network/interfaces
+  cat >> /etc/network/interfaces <<END
 iface eth0 inet static
     address ${install_config_ip_address}
     netmask ${install_config_netmask}
     gateway ${install_config_gateway}
 END
+fi
+
+# Add static IP configuration
+if [ -r /etc/sysconfig/network-scripts/ifcfg-eth0 ] ; then
+  cat > /etc/sysconfig/network-scripts/ifcfg-eth0 <<END
+DEVICE="eth0"
+BOOTPROTO="static"
+ONBOOT="yes"
+IPADDR=${install_config_ip_address}
+NETMASK=${install_config_netmask}
+GATEWAY=${install_config_gateway}
+DELAY=0
+END
+fi
+
+
 EOF
 
   chmod 755 ${tempdir}/overlay/updates.script
@@ -197,24 +222,6 @@ function delete_overlay() {
   rm -f ${image}/updates.iso 
 }
 
-function postinstall() {
-  for o in "${install_config_postinstall[@]}" ; do
-    echo "Executing postinstall $o"
-    if [ "${o:0:1}" == "/" ] ; then
-      local cmd=$o
-    else
-      local cmd="$(dirname $0)/../post-install-hooks/$o"
-    fi
-    if [ ! -x "$cmd" ] ; then
-      echo "Unable to execute non-executable post-install hook: $cmd"
-      delete_overlay
-      exit 1
-    fi
-    cmd=$(readlink -f "$cmd")
-    $cmd "$config" "$image" || exitonerror $? "Postinstall script $cmd exited nonzero return code."
-  done
-}
-
 copy_original_image
 resize_original_image
 generate_ssh_key
@@ -227,6 +234,7 @@ create_overlay
 # chain to boot.sh to actually start the image.
 $(dirname $0)/boot.sh $1 $2
 
-postinstall
+rc=$?
 delete_overlay
 
+exit $rc

@@ -1,16 +1,9 @@
-# ece-install module for installing EAE
+# ece-install module for installing Escenic Analysis Engine (EAE),
+# also known as "Stats".
 
-function install_analysis_server()
-{
+function install_analysis_server() {
   run_hook install_analysis_server.preinst
-  
   print_and_log "Installing an analysis server on $HOSTNAME ..."
-  type=analysis
-  
-  install_ece_instance "analysis1"
-
-  run cp ${escenic_root_dir}/analysis-engine-*/wars/*.war \
-    ${tomcat_base}/webapps
 
   if [ -n "${fai_analysis_host}" ]; then
     appserver_host=${fai_analysis_host}
@@ -18,32 +11,68 @@ function install_analysis_server()
   if [ -n "${fai_analysis_port}" ]; then
     appserver_port=${fai_analysis_port}
   fi
-  
-    # deploy the EAE WARs
+
+  type=analysis
+  install_ece_instance "analysis1"
+
+  # deploy the EAE WARs
   run cp ${escenic_root_dir}/analysis-engine-*/wars/*.war \
     ${tomcat_base}/webapps
 
   set_correct_permissions
-  
-  local ece_command="ece -i ${instance_name} -t ${type} start"
-  su - $ece_user -c "$ece_command" 1>>$log 2>>$log
-  exit_on_error "su - $ece_user -c \"$ece_command\""
+  set_up_analysis_conf
+  set_up_analysis_plugin_nursery_conf
 
-  local seconds=3
-  print_and_log "Waiting ${seconds} seconds for EAE to come up ..."
-  sleep 10
-  
-    # EAE cannot handle .cfg files with quotes values (!)
+  run su - $ece_user -c "ece -i ${instance_name} -t ${type} restart"
+  run_hook install_analysis_server.postinst
+}
+
+## $1 :: WAR
+## $2 :: path to file inside WAR
+## $3 :: target file
+function extract_path_from_war_if_target_file_doesnt_exist() {
+  local war=$1
+  local path=$2
+  local file=$3
+
+  if [ ! -e $file ]; then
+    make_dir $(dirname $file)
+    (
+      run cd $(dirname $file)
+      run jar xf $war $path
+      run mv $path $file
+      run rmdir $(dirname $path)
+      run rmdir $(dirname $(dirname $path))
+    )
+  fi
+}
+
+## This is EAE's own configuration, not the ECE plugin part, see
+## set_up_analysis_plugin_nursery_conf
+function set_up_analysis_conf() {
+
+  # EAE cannot handle .cfg files with quotes values (!)
   dont_quote_conf_values=1
-  
+
+  # First, configure EAE reports
   print_and_log "Configuring EAE Reports ..."
-  local file=${tomcat_base}/webapps/analysis-reports/WEB-INF/config/reports.cfg
+  # extract cfg files if the don't exist already
+  local file=${escenic_conf_dir}/analysis/reports.cfg
+  local path=WEB-INF/config/reports.cfg
+  local war=${escenic_root_dir}/analysis-engine-*/wars/analysis-reports.war
+  extract_path_from_war_if_target_file_doesnt_exist $war $path $file
+
   set_conf_file_value queryServiceUrl \
     http://${appserver_host}:${appserver_port}/analysis-qs/QueryService \
     ${file}
 
+  # Second, configure EAE Logger
   print_and_log "Configuring EAE Logger ..."
-  local file=${tomcat_base}/webapps/analysis-logger/WEB-INF/config/logger.cfg
+  local war=${escenic_root_dir}/analysis-engine-*/wars/analysis-logger.war
+  local path=WEB-INF/config/logger.cfg
+  local file=${escenic_conf_dir}/analysis/logger.cfg
+  extract_path_from_war_if_target_file_doesnt_exist $war $path $file
+
   set_conf_file_value databaseQueueManager.reinsertcount \
     6 \
     ${file}
@@ -56,12 +85,29 @@ function install_analysis_server()
   set_conf_file_value pageview.aggr.hour.older.than.hours 2 $file
   set_conf_file_value pageview.maintenance.older.than.days 0 $file
 
-    # important to turn this off here, it's only for the EAE .cfg
-    # files, see above.
-  dont_quote_conf_values=0
+  # Third, configure the EAE query service
+  print_and_log "Configuring EAE query service ..."
+  local war=${escenic_root_dir}/analysis-engine-*/wars/analysis-qs.war
+  local path=WEB-INF/config/qs.cfg
+  local file=${escenic_conf_dir}/analysis/qs.cfg
+  extract_path_from_war_if_target_file_doesnt_exist $war $path $file
 
-    # touching web.xml to trigger a re-deploy of the EAE Reports
-    # application.
-  run touch ${tomcat_base}/webapps/analysis-reports/WEB-INF/web.xml
-  run_hook install_analysis_server.postinst
+  # important to turn this off here, it's only for the EAE .cfg
+  # files, see above.
+  dont_quote_conf_values=0
+}
+
+function set_up_analysis_plugin_nursery_conf() {
+  local file=$common_nursery_dir/com/escenic/analysis/EaePluginConfig.properties
+  make_dir $(dirname $file)
+  cat > $file <<EOF
+\$class=com.escenic.ece.plugin.eae.EaePluginConfig
+eaeQsUrl=http://${appserver_host}:${appserver_port}/analysis-qs/QueryService
+earUrl=http://${appserver_host}:${appserver_port}/analysis-reports
+cacheSize=1000
+cacheElementTimeout=2
+distinctMetaCountEnabled=false
+EOF
+
+  print_and_log "EAE Nursery component configured in $file"
 }

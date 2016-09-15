@@ -1,3 +1,49 @@
+#+TITLE: The VOSA Guide
+#+AUTHOR: Vizrt Online / The SaaS Team
+#+OPTIONS: H:6 num:5 toc:2
+
+* NAME
+vosa - command to manage KVM and Amazon instances that typically form
+a cluster of servers serving one or more Escenic based web sites.
+
+* SYNOPSIS
+vosa [-i instance-dir] [-v uec-version] [-V] [-d] [-h] COMMAND
+
+* OPTIONS
+** -i instance-dir
+Most [[COMMANDS]] require the *-i* parameter to be set. You pass it the
+path to your VM's configuration like this:
+#+BEGIN_SRC sh
+# vosa -i /etc/vizrt/vosa/available.d/vm03 enable
+#+END_SRC
+** -v uec-version
+Let's you specify the UEC version to use
+** -d
+Make *vosa* more verbose. The more *-d* switches you specify, the
+more verbose it gets.
+** -V
+Print the *vosa* version and exit
+** -h
+Print usage help and exit.
+
+* COMMANDS
+** enable
+Enable a specific VM.
+** disable
+Disable a specific VM.
+** install
+Creates a new disk image etc.
+** uninstall
+Removes the disk image etc.
+** start
+Starts (boots) the VM.
+** status
+Tells you about the VM, if it's enabled, running, alive, its uptime.
+** make
+Makes a vmdk image of the vm
+** ova
+Creates a ova file from the vmdk image.
+
 * What is VOSA?
 
 Vosa is short for Vizrt Online System Administration, a set of tools
@@ -10,7 +56,7 @@ and tools to install puppets that do what that puppet master says.
 
 All of this is possible manually by apt-get'ing and configuring
 manualy; the value of these scripts is that all of this is
-made possible without intervention.
+made possible without intervention..
 
 There are various post-installation hooks available which perform
 various tasks, for simple things like creating an /etc/motd file,
@@ -48,19 +94,32 @@ The Vosa scripts do just that.
 
 A short definition file tells vosa what base image to start with;
 this is an Ubuntu Enterprise Cloud image, but in theory other image
-types could be supported.  The file also provides it an IP address
-and the machine's time zone, and so on.  Most importantly, these
-files also tell vosa what to do with the virtual machine once it
-has booted, so-called "post install hooks".  Each of these are
-executed when the "first boot" has completed.  These hooks run
-only the first time the virtual machine has booted, and should be
-written in such a way that they end up with a production ready
-system that can go straight into production.
+types could be supported.  The file also provides networking
+parameters and so on.  Most importantly, these files also tell vosa
+what to do with the virtual machine once it has booted, so-called
+"post install hooks".  Each of these are executed when the "first
+boot" has completed.  These hooks run only the first time the
+virtual machine has booted, and should be written in such a way that
+they end up with a production ready system that can go straight into
+production.
 
-The machines can be stopped, started, and so on, and since vosa
-relies on simple kvm, you can access the kvm monitor or vnc if you
-want to.  Vosa also sets up throw-away ssh keys that the host uses
-to interact with the guest during the first boot.
+** Amazon or Physical?
+
+Vosa supports two flavours of virtualization, namely one based on
+Amazon's excellent Elastic Compute Cloud (EC2), and one based on the
+excellent Open Source Kernel-based Virtual Machine (KVM).  Vosa aims
+to blur the boundaries of these two types of virtualization, making
+it possible to use the same technologies for installing software.
+The possibility of using local hardware makes it possible to run a
+cheap stack of virtual machines using the same method of installing
+software as the production environment.  Developers can also have a
+local "stack" of virtual machines, and not have to rely on AWS for
+virtualization.
+
+In the absence of EC2 metadata service that's available to real
+cloud instances, the kvm flavour of virtualization allows some
+additional perks, like vnc support, and it generates "throw-away"
+SSH keys which are used for a single kvm instance.
 
 ** What can I do with this?
 
@@ -81,8 +140,9 @@ vosa.
 
 ** Requirements:
 
-In order to benefit from vosa, you need the following:
+In order to benefit from running vosa with kvm, you need the following
 
+- A physical machine that supports virtualization
 - kvm or qemu-kvm
 - genisoimage
 - nc
@@ -93,7 +153,48 @@ In order to benefit from vosa, you need the following:
 In theory, it should be possible to script this too, or to get e.g.
 puppet to do this for us.  Watch this space!
 
-** Setup
+In order to benefit from running vosa with ec2, you need the following
+
+- Amazon account
+- ec2-api-tools
+- A named SSH keypair
+- Signing key
+
+** Setting up vosa on EC2
+
+Commonly, setting up vosa in the cloud entails first making an EC2
+instance that will act as "the control server".  vosa will typically
+be installed there.
+
+   : apt-get install vosa
+
+The vosa command should now work (to a certain extent)
+
+   : vosa help
+   : vosa commands
+   : vosa longhelp | less
+
+To make vosa usable, you need to initialize it:
+
+   : sudo vosa init
+
+This will create the /etc/vizrt/vosa directory structure, and a
+skeleton of a virtual machine definition.
+
+#+BEGIN_SRC sh
+$ sudo cp -r /etc/vizrt/vosa/skeleton-amazon \\
+  /etc/vizrt/vosa/available.d/my-first-vosa
+#+END_SRC
+
+Configure the my-first-vosa/amazon.conf file as you see fit.  This would include:
+
+- Generate (or re-use) an SSH private key, and uploading the public key to Amazon
+- Generate (or re-use) an EC2 API signing key, and uploading the certificate to Amazon
+- Create a VPC and subnet (if you want to deploy the instances to a VPC subnet)
+
+Details on these steps are outlined in the sample amazon.conf file.
+
+** Setting up vosa on bare metal (kvm)
 
 Setting up vosa entails a few manual installation steps.  Among other
 things it will
@@ -102,14 +203,13 @@ things it will
 - create 10 tap interfaces (an arbitrary number, really, see below
   for an explanation).
 - create the same number of "tap*.availablenetwork" files in
-  /var/run/vizrt/vosa/ each one signifying the names of the tap
+  */var/run/vizrt/vosa/* each one signifying the names of the tap
   interfaces that can be used.
 
 So without further ado, let's get started.  First of all, we need to
 onstall the vosa command itself and its required libraries:
 
-   : ln -s $PWD/usr/bin/vosa /usr/bin/vosa
-   : ln -s $PWD/usr/share/vizrt/ /usr/share/vizrt
+   : apt-get install vosa
 
 The vosa command should now work (to a certain extent)
 
@@ -143,14 +243,26 @@ doing this temporarily (ca 10 seconds) makes the network go
 completely dark, and so shouldn't happen whenever any virtual
 machines are running.
 
-   : for i in $(seq 1 10) ; do
-   :   tap=$(tunctl -b)
-   :   touch /var/run/vizrt/vosa/$tap.availablenetwork
-   :   brctl addif br0 $tap
-   :   ifconfig $tap up 0.0.0.0
-   : done
+#+BEGIN_SRC sh
+mkdir -p /var/run/vizrt/vosa
+br=br0
+for i in $(seq 1 10) ; do
+  tap=$(tunctl -b)
+  echo $br > /var/run/vizrt/vosa/$tap.availablenetwork
+  brctl addif $br $tap
+  ifconfig $tap up 0.0.0.0
+done
+#+END_SRC
 
-tunctl creates the tap interface, and we create a file with the name
+If your machine has multiple network interfaces, talking with different
+physical networks, you need to make several bridges, and create tap
+devices for each bridge, indicating which bridge the tap interface is
+bound to.  The above script uses the *br0* bridge.
+
+This needs to happen every time you boot, so the script above should be
+copied to e.g. /etc/rc.local or some other system wide boot location.
+
+*tunctl* creates the tap interface, and we create a file with the name
 of the created tap interface in a directory.  This little snippet
 needs to run every time the host machine boots.
 
@@ -167,12 +279,15 @@ in Amazon EC2, and also in a Eucalyptus private cloud.  This means
 that vosa will be able to control Amazon EC2 images in the same way.
 
 Defining a virtual machine means creating two files (boot.conf and
-install.conf) in a directory.  "vosa init" has already created a
+install.conf) in a directory.  *vosa init* has already created a
 documented skeleton which you can customize as you see fit.
 
-   : mkdir /etc/vizrt/vosa/available.d/my-first-vm &&
-   : cp /etc/vizrt/vosa/skeleton/* /etc/vizrt/vosa/available.d/my-first-vm/
-   : vi /etc/vizrt/vosa/available.d/my-first-vm/*
+#+BEGIN_SRC sh
+mkdir /etc/vizrt/vosa/available.d/my-first-vm && \\
+cp /etc/vizrt/vosa/skeleton-kvm/* \\
+  /etc/vizrt/vosa/available.d/my-first-vm/
+vi /etc/vizrt/vosa/available.d/my-first-vm/*
+#+END_SRC
 
 Note that the name you choose ("my-first-vm") must be a valid
 internet host name with no domain part.  I.e. only lowercase
@@ -199,20 +314,39 @@ To install the machine, just issue the "install" command:
 
    : vosa -i my-first-vm install
 
-This will copy the disk image to /var/lib/vizrt/vosa/images/my-first-vm/
-and put some more files in there (like the SSH private key), and
-finally it will boot up the image and use the UEC's cloud-init
-support to prime the image and execute any post-installation hooks
-you defined.
+This will copy the disk image
+to */var/lib/vizrt/vosa/images/my-first-vm/* and put some more files
+in there (like the SSH private key), and finally it will boot up the
+image and use the UEC's cloud-init support to prime the image and
+execute any post-installation hooks you defined.
 
 The host name (as the machine sees it, at least) will be the same as
 the name of the virtual machine; in this case "my-first-vm"
 
 When it's done you can SSH into the system:
 
-   : ssh -F /var/lib/vizrt/vosa/my-first-vm/ssh.conf root@guest
+   : ssh -F /var/lib/vizrt/vosa/my-first-vm/ssh.conf guest
 
 Not that you should need to do that, of course.
+
+** Making a development image
+
+Making a development image from the virtual machine is also possible using
+vosa. The main purpose of the development image is to boost the development
+time with in an production like environment. We can create VMDK (Virtual Machine Disk)
+files from the UEC images used to create the virtual machine. It is also possible
+to create a OVA (Open Virtual Archive) file from the generated VMDK image to use
+it out of the box in VirtualBox.
+
+To make a VMDK image we have to run
+#+BEGIN_SRC sh
+vosa -i my-first-vm make
+#+END_SRC
+
+We can create a VMDK and ova file with a single command like
+#+BEGIN_SRC sh
+vosa -i my-first-vm make ova
+#+END_SRC
 
 * Puppet Master
 
@@ -224,10 +358,10 @@ To make this possible, vosa supplies a post-install hook. This hook:
 - configures the puppet master to use hostnames instead of its DNS
   name for certificates
 - configures a self signed certificate for all guests (mainly to avoid
-  having to sign or auto-sign the puppets, since that would be
-  problematic when a puppet happens to be re-installed)
+  having to sign or auto-sign the puppets, since that is problematic
+  when a machine is re-installed)
 - creates vosa post-installation hook to set up a pre-authenticated
-  puppet in /etc/vizrt/vosa/puppet/<puppetmaster-name>-client.sh
+  puppet in */etc/vizrt/vosa/puppet/<puppetmaster-name>-client.sh*
 
 This makes it possible to define more virtual machines that
 automatically dance to the puppet master's tune.
@@ -236,4 +370,11 @@ Making this useful of course means pushing your puppet configuration
 into the puppet master, but that's outside the scope of this
 document.
 
+* COPYRIGHT
+Copyright 2011-2013 Vizrt
 
+Licensed under the Apache License, Version 2.0, see
+https://github.com/vizrt/ece-scripts/COPYING for further details.
+
+* AUTHOR
+Erik Mogsensen

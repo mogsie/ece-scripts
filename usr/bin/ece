@@ -6,28 +6,41 @@
 #
 # echo comments and suggestions > tkj@vizrt.com
 
+######################################################################
+# Needs to be here to bootstrap the ece script itself when it looks
+# for the ece[-[a-z0-9]*].conf files.
+#
+# There is one to avoid this bootstrap dependency, and that is to set
+# the ECE_CONF_LOCATIONS environment variable, however this is quite
+# uncommon and generally speaking not recommended.
+######################################################################
+escenic_conf_dir=/etc/escenic
 
 ######################################################################
 # Script defaults, my be overriden in any of the configration files
 ######################################################################
-verbose=0
 force_ipv4=0
 quiet=0
 everything_but_the_kitchen_sink=0
-escenic_conf_dir=/etc/escenic
 
 ######################################################################
 # Dear user, don't touch anyting in this script, especially below this
 # line :-)
 ######################################################################
+ece_scripts_version="straight-from-github"
 type=engine
 instance=default
 command=""
 backup_exclude_binaries=0
-http_user=""
-http_password=""
-wget_auth=""
-curl_auth=""
+backup_exclude_conf=0
+backup_exclude_db=0
+backup_exclude_init=0
+backup_exclude_multimedia=0
+backup_exclude_solr=0
+backup_exclude_state=0
+wget_appserver_auth=""
+curl_appserver_auth=""
+log=""
 
 type_list="
 engine
@@ -45,6 +58,7 @@ engine_required_fields="
 appserver
 assemblytool_home
 cache_dir
+data_dir
 escenic_conf_dir
 ece_home
 ece_security_configuration_dir
@@ -54,7 +68,7 @@ enable_remote_monitoring
 java_home
 solr_home
 log_dir
-pid_dir
+run_dir
 tmp_dir
 "
 
@@ -70,88 +84,49 @@ appserver
 java_home
 tmp_dir
 "
-####################################################################
-# Will exit the ece execution if the last operation failed. While
-# failing, it will print the message passed to the function.
-####################################################################
-function exit_on_error()
-{
-    if [ $? -eq 1 ]; then
-        print $@ "FAILED, exiting :-("
-        exit 1
-    fi
-}
 
-function run()
-{
-    $@ 1>>$log_file 2>>$log_file
-    exit_on_error $@
-}
+## Bootstrapping, load files from /usr/share/escenic/ece-scripts The
+## method will first try to be smart, in case the user has copied the
+## ece-scripts somewhere else., e.g.: moved everything to ~/ece-scrpts
+## or /opt/escenic/ece-scripts, this should also work.
+function init() {
+  # first, try to be nice
+  local dir=$(dirname $0)/../share/escenic/ece-scripts
 
-####################################################################
-# debug/verbose method
-####################################################################
-function debug()
-{
-    if [ "$verbose" -eq 1 ]; then
-        print $@
-    fi
-}
+  # then check the standard location
+  if [ ! -d $dir  ]; then
+    dir=/usr/share/escenic/ece-scripts
+  fi
 
-function print()
-{
-    if [ "$quiet" -eq 0 ]; then
-        echo "$id" $@
-    fi
-}
+  if [ -d $dir ]; then
+    # load common libraries
+    common_libraries="common-bashing.sh common-io.sh common-os.sh common-ece.sh"
+    for el in $common_libraries; do
+      source $dir/${el}
+    done
 
-function log()
-{
-    echo $(date) "$id" $@ 2>/dev/null >> $log_file 
-}
-
-function print_and_log()
-{
-    print "$@"
-    log "$@"
-}
-
-function verify_that_directory_and_file_are_writeable()
-{
-    dir=`dirname $1`
-    if [ ! -e $dir ]; then
-        print $1: $dir " doesn't exist"
-        exit 1
-    fi
-    if [ ! -w $dir ]; then
-        print $1: $dir " isn't writable for user $USER"
-        exit 1
-    fi
-
-    if [ -e $1 ]; then
-        if [ ! -w $1 ]; then
-            print $1 "exists, "
-            print "but isn't write-able for user $USER"
-            print "check the permissions and that $USER is the correct one"
-            print "to run "`basename $0`
-            exit 1
-        fi
-    fi
+    # load ece-install modules
+    for el in $dir/ece.d/*.sh; do
+      source $el
+    done
+  else
+    echo "I cannot find $(basename $0)'s dependencies, exiting :-("
+    exit 1
+  fi
 }
 
 ####################################################################
 # Ensures that all required fields are set. Will report all missing
 # required fields before failing.
 ####################################################################
-function ensure_that_required_fields_are_set()
-{
+function ensure_that_required_fields_are_set() {
     requirements_failed=0
-    
+
     for el in $@; do
         if [ -n "$(eval echo $`echo $el`)" ]; then
             continue
         fi
-        
+
         print "You need to specifiy '$el' in one of ${ece_conf_files_read[@]}"
         requirements_failed=1
     done
@@ -163,8 +138,7 @@ function ensure_that_required_fields_are_set()
 
 ece_conf_files_read=()
 
-function read_conf_file()
-{
+function read_conf_file() {
     for el in $conf_file_location_list; do
         if [ -r $el/$1 ]; then
             debug "found $1 in $el, reading it"
@@ -175,22 +149,33 @@ function read_conf_file()
     done
 }
 
-# If the system is installed using the recommended paths, the method
-# will return a list of the instances configured in
-# ${escenic_conf_dir}/engine/instance
-function get_instance_list()
-{
+## If the system is installed using the recommended paths, the method
+## will return a list of the instances configured in
+## ${escenic_conf_dir}/ece-*.conf
+function get_instance_list() {
+    local allowed_types="engine analysis changelogd search rmi-hub"
     instance_list=""
+    for el in $(\ls /etc/escenic/ece-*.conf 2>/dev/null); do
 
-    if [ -r ${escenic_conf_dir}/engine/instance ]; then
-        instance_list=$(ls ${escenic_conf_dir}/engine/instance)
-    fi
+      local instance=$(basename $el .conf)
+      instance=${instance##ece-}
+
+      for ele in $allowed_types; do
+        if [[ $instance == $ele ]]; then
+          instance=""
+          continue
+        fi
+
+        local away="${ele}-"
+        instance=${instance##${away}}
+      done
+      instance_list="$instance_list $instance"
+    done
 
     echo $instance_list
 }
 
-function set_common_settings()
-{
+function set_common_settings() {
     # This behaviour can be overridden by specifying a list of
     # locations in the environment variable ECE_CONF_LOCATIONS
     if [ -n "$ECE_CONF_LOCATIONS" ] ; then
@@ -209,43 +194,35 @@ function set_common_settings()
 
     # main configuration file, may be overridden in the type and
     # instance specific ones.
-    read_conf_file `basename $0`.conf
+    read_conf_file $(basename $0).conf
 
-    if [ "$instance" == "default" ]; then
-        log_file=$log_dir/$type.out
-        pid_file=$pid_dir/$type.pid
-    else
-        log_file=$log_dir/$type-$instance.out
-        pid_file=$pid_dir/$type-$instance.pid
-    fi
+    log=$log_dir/$instance.out
+    pid_file=$run_dir/$instance.pid
 
-    log_file_list="
+    gc_log=${log_dir}/${instance}-gc.log
+
+    log4j_file_list="
       $log_dir/${HOSTNAME}-${instance}-messages
+      $log_dir/${instance}-messages
       $log_dir/messages
       $log_dir/Escenic-error.log
     "
 
-    if [[ -n "$http_user" && -n "$http_password" ]]; then
-        wget_auth="--http-user $http_user --http-password $http_password"
-        curl_auth="-u ${http_user}:${http_password}"
-    fi
 }
 
-function set_type_settings()
-{
+function set_type_settings() {
     # optional: possible to have type specific conf file,
     # will take precedences over the common one.
-    read_conf_file `basename $0`-$type.conf
+    read_conf_file $(basename $0)-$type.conf
 }
 
-function set_type_pid()
-{
+function set_type_pid() {
     if [ "$(uname)" == "Linux" ]; then
         ps_options="auxww"
     else
         ps_options="-ef"
     fi
-    
+
     # Get a hold of the PID of the process. Although we've got the PID
     # file, we stil get the PID from the OS here as we used it for
     # sanity checking later on, see stop_type().
@@ -263,8 +240,7 @@ function set_type_pid()
     debug "type_pid is now=$type_pid"
 }
 
-function set_type_port()
-{
+function set_type_port() {
     host=localhost
     # port set in ece[-instance].conf takes precedence
     if [ -n "${appserver_port}" ]; then
@@ -277,9 +253,9 @@ function set_type_port()
     else
         if [ -r $tomcat_base/logs/catalina.out ]; then
             # for tomcat6-user packaged tomcats (and perhaps others)
-            out_log=$tomcat_base/logs/catalina.out
+            out_log=$log_dir/${instance_name}-tomcat-catalina.out
         else
-            out_log=$log_file
+            out_log=$log
         fi
 
         if [ -r $out_log ]; then
@@ -294,12 +270,11 @@ function set_type_port()
     debug "set_type_port=$port"
 }
 
-function set_instance_settings()
-{
+function set_instance_settings() {
     # optional: possible to have instance specific conf files,
     # these will take precedence over the other two
-    read_conf_file `basename $0`-$instance.conf
-    read_conf_file `basename $0`-$type-$instance.conf
+    read_conf_file $(basename $0)-$instance.conf
+    read_conf_file $(basename $0)-$type-$instance.conf
 
     # at this point in the script flow, we have now read all the
     # possible combinations of conf files (common, type and instance)
@@ -310,6 +285,8 @@ function set_instance_settings()
         ensure_that_required_fields_are_set $search_required_fields
     elif [ "$type" == "engine" ]; then
         ensure_that_required_fields_are_set $engine_required_fields
+    elif [ "$type" == "analysis" ]; then
+        ensure_that_required_fields_are_set $analysis_required_fields
     fi
 
     # We respect ece_server if it's set in any of the configuration
@@ -323,7 +300,7 @@ function set_instance_settings()
     fi
 
     set_type_pid
-   
+
     # if type is rmi-hub, we don't' need more configuration.
     if [ "$type" == "rmi-hub" ]; then
         return
@@ -340,17 +317,45 @@ function set_instance_settings()
     # * java.security for configuring the Java security framework with ECE.
     # * garbage collection log: this is paramount to keep an eye on
     #   when running in production.
-    ece_args="-Descenic.server=$ece_server\
-              -Dsolr.solr.home=$solr_home\
-              -Djava.awt.headless=true\
-              -Djava.security.auth.login.config=$ece_security_configuration_dir/jaas.config\
-              -Djava.security.policy=$ece_security_configuration_dir/java.policy\
-              -XX:+PrintGCTimeStamps\
-              -XX:+PrintGCDetails\
-              -Xloggc:${log_dir}/${type}-${instance}-gc.log"
+    ece_args="
+      -Descenic.server=$ece_server
+      -Djava.awt.headless=true
+      -Djava.security.auth.login.config=$ece_security_configuration_dir/jaas.config
+      -Djava.security.policy=$ece_security_configuration_dir/java.policy
+      -Dsolr.solr.home=$solr_home
+      -XX:+PrintGCDetails
+      -XX:+PrintGCTimeStamps
+      -Xloggc:${gc_log}
+    "
+
+    if [ "$jvm_gc_settings" ]; then
+      ece_args=$ece_args" "$jvm_gc_settings
+    fi
+
+    jvm_rolling_gc=${jvm_rolling_gc-1}
+    if [ "$jvm_rolling_gc" == 1 ]; then
+      gc_rolling_args="
+	-XX:+UseGCLogFileRotation
+	-XX:NumberOfGCLogFiles=${number_of_gc_log_files-5}
+	-XX:GCLogFileSize=${gc_log_file_size-5m}
+      "
+      ece_args=$ece_args" "$gc_rolling_args
+    fi
+
+    if [ "$jvm_proxy_settings" ]; then
+      ece_args=$ece_args" "$jvm_proxy_settings
+    fi
+
+    if [ "$jvm_connection_settings" ]; then
+      ece_args=$ece_args" "$jvm_connection_settings
+    fi
 
     if [ "$instance" != "default" ]; then
         ece_args=$ece_args" -Dcom.escenic.instance=$instance"
+    fi
+
+    if [ -n "$ece_environment" ]; then
+        ece_args=$ece_args" -Dcom.escenic.environment=${ece_environment}"
     fi
 
     if [ "$ece_server_hostname" ]; then
@@ -376,22 +381,26 @@ function set_instance_settings()
     if [ "$max_permgen_size" ]; then
         ece_args=$ece_args" -XX:MaxPermSize=$max_permgen_size"
     fi
-    
+
     if [ "$jvm_encoding" ]; then
         ece_args=$ece_args" -Dsun.jnu.encoding=$jvm_encoding"
         ece_args=$ece_args" -Dfile.encoding=$jvm_encoding"
     fi
 
+    if [ "$analysis_conf_dir" ]; then
+      ece_args=$ece_args" -Dcom.escenic.eae.config=${analysis_conf_dir}"
+    fi
+
     if [ "$enable_remote_debugging" -eq 1 ]; then
         ece_args=$ece_args" -Xdebug -Xnoagent -Djava.compiler=NONE \
                             -Xrunjdwp:transport=dt_socket,server=y,suspend=n,address=$remote_debugging_port"
-    fi          
+    fi
 
     if [ "$enable_remote_monitoring" -eq 1 ]; then
         ece_args=$ece_args" -Dcom.sun.management.jmxremote"
         ece_args=$ece_args" -Dcom.sun.management.jmxremote.authenticate=false"
         ece_args=$ece_args" -Dcom.sun.management.jmxremote.ssl=false"
-        ece_args=$ece_args" -Dcom.sun.management.jmxremote.port=$remote_monitoring_port" 
+        ece_args=$ece_args" -Dcom.sun.management.jmxremote.port=$remote_monitoring_port"
     fi
 
     if [ "$enable_heap_dump" -eq 1 ]; then
@@ -402,10 +411,25 @@ function set_instance_settings()
     if [ "$force_ipv4" -eq 1 ]; then
         ece_args=$ece_args" -Djava.net.preferIPv4Stack=true"
     fi
-    
+
+    if [[ -n "$escenic_admin_http_user" && -n "$escenic_admin_http_password" ]]; then
+      wget_appserver_auth="
+        --http-user $escenic_admin_http_user
+        --http-password $escenic_admin_http_password
+      "
+      curl_appserver_auth="-u ${escenic_admin_http_user}:${escenic_admin_http_password}"
+    fi
+
+    if [[ -n "$builder_http_user" && -n "$builder_http_password" ]]; then
+      wget_builder_auth="
+        --http-user $builder_http_user
+        --http-password $builder_http_password
+      "
+    fi
+
     # Resin needs some more arguments as its XML parser is not
     # compatible with ECE.
-    if [ "$appserver" == "resin" ]; then
+    if [[ "$appserver" == "resin" ]]; then
         ece_args="$ece_args\
            -Dorg.xml.sax.driver=org.apache.xerces.parsers.SAXParser
            -Djavax.xml.stream.XMLInputFactory=com.sun.xml.stream.ZephyrParserFactory
@@ -427,21 +451,24 @@ function set_instance_settings()
     export ECE_HOME=$ece_home
     export JAVA_OPTS="$JAVA_OPTS $ece_args"
     export JAVA_HOME=$java_home
-    
+
     debug ECE_HOME=$ECE_HOME
     debug JAVA_HOME=$JAVA_HOME
     debug JAVA_OPTS=$JAVA_OPTS
 }
 
-function sanity_check()
-{
+function sanity_check() {
     if [ "$(whoami)" == "root" ]; then
         print "Sorry, you cannot be root when running $(basename $0)"
         print "The root user can only use /etc/init.d/ece"
         exit 1
     fi
-    
-    verify_that_directory_and_file_are_writeable $log_file
+
+    if [ "$(echo $command)" == "list-instances" ]; then
+      return
+    fi
+
+    verify_that_directory_and_file_are_writeable $log
     verify_that_directory_and_file_are_writeable $pid_file
 
     if [ -z "$command" ]; then
@@ -449,13 +476,13 @@ function sanity_check()
         exit 1
     fi
 
+    local instance_list=$(get_instance_list)
     # checks if the user is using the default instance when he/she
     # really wants to start one of the instances installed on the
     # system.
     if [ "$instance" == "default" -a \
         "$type" == "engine" -a \
         $(echo $command | egrep 'help' | wc -l) -eq 0 ]; then
-        instance_list=$(get_instance_list)
         if [[ -n "$instance_list" && \
             $(echo $instance_list | grep ' ' | wc -l) -gt 0 ]]; then
             print "You must specify the instance with -i <instance>"
@@ -463,6 +490,19 @@ function sanity_check()
             print "Instances available on $HOSTNAME: $instance_list"
             exit 1
         fi
+    fi
+
+    local instance_exists=0
+    for el in $instance_list; do
+      if [ $el == $instance ]; then
+        instance_exists=1
+        break
+      fi
+    done
+
+    if [ $instance_exists -eq 0 ]; then
+      print "Instance '$instance' doesn't exist on $HOSTNAME"
+      exit 1
     fi
 
     # verifies that java_home exists and has the java executable
@@ -476,172 +516,12 @@ function sanity_check()
     fi
 }
 
-function deploy()
-{
-    ear=$cache_dir/engine.ear
-    if [ ! -e "$ear" ]; then
-        print_and_log "$ear does not exist. "
-        print_and_log "Did you run '"`basename $0`" -i" $instance "assemble'?"
-        exit 1
-    fi
-    
-    # extract EAR to a temporary area
-    local dir=$(mktemp -d)
-    (mkdir -p $dir && cd $dir && jar xf $ear)
-    exit_on_error "extracting $ear to $dir"
-
-    print "Deploying $ear on $appserver ..."
-    
-    case $appserver in
-        tomcat)
-            # We do not want the Escenic jars to share the same
-            # classloader folder as tomcat does We thereby want
-            # clients to use a separate escenic classloader to avoid
-            # strange upgrade problems i.e wrong versions of certain
-            # libraries.
-            if [ -d $tomcat_base/escenic/lib ]; then
-                if [ `ls $tomcat_base/escenic/lib | grep .jar | wc -l` -gt 0 ]; then
-                    rm $tomcat_base/escenic/lib/*.jar
-                    exit_on_error "removing previous deployed libraries"
-                fi
-                cp $dir/lib/*.jar \
-                    $tomcat_base/escenic/lib  \
-                    1>>$log_file \
-                    2>>$log_file
-                exit_on_error "deploying jar files to $tomcat_base/escenic/lib"
-            else
-                print "Could not find $tomcat_base/escenic/lib. Exiting."
-                print "Also make sure that you have defined this directory in"
-                print "  $tomcat_base/conf/catalina.properties"
-                print "see sample configuration in the engine distribution"
-                print "  contrib/appserver/tomcat/catalina-sample.properties"
-                exit 1
-            fi
-            
-            exit_on_error "copying lib files to app server classpath"
-
-            rm -rf $tomcat_base/work/* \
-                1>>$log_file \
-                2>>$log_file
-            
-            exit_on_error "removing work files from tomcat"
-
-            for war in $dir/*.war ; do
-                if [ -d $tomcat_base/webapps/`basename $war .war` ] ; then
-                    rm -rf $tomcat_base/webapps/`basename $war .war` \
-                        1>>$log_file \
-                        2>>$log_file
-                    exit_on_error "removing already deployed escenic wars in $tomcat_base/webapps/"
-                fi
-            done
-
-            # this scenario is likely when running many minimal
-            # instances of tomcat and some of these are not properly
-            # initialised.
-            if [ ! -d $tomcat_base/webapps ]; then
-                print $tomcat_base/webapps "doesn't exist, exiting."
-                exit 1
-            fi
-            
-            if [ -n "$deploy_webapp_white_list" ]; then
-                deploy_this_war=0
-                message="Deployment white list active, only deploying: "
-                message=$message"$deploy_webapp_white_list"
-                print $message
-                log $message
-            fi
-                        
-            for war in $dir/*.war ; do
-                name=`basename $war .war`
-
-                deploy_this_war=1
-                if [ -n "$deploy_webapp_white_list" ]; then
-                    deploy_this_war=0
-
-                    for el in $deploy_webapp_white_list; do
-                        if [ "$el" == $name ]; then
-                            debug "found $war in white list, will deploy it"
-                            deploy_this_war=1
-                        fi
-                    done
-                fi
-
-                if [ "$deploy_this_war" -eq 0 ]; then
-                    continue
-                fi
-                
-                (cd $tomcat_base/webapps &&
-                    mkdir $name &&
-                    cd $name &&
-                    jar xf $war \
-                        1>>$log_file \
-                        2>>$log_file)
-                add_memcached_support $tomcat_base/webapps/$name
-                exit_on_error "extracting $war to $tomcat_base/webapps/"
-            done
-            ;;
-        
-        resin)
-            if [ ! -d $resin_home/deploy ]; then
-                mkdir -p $resin_home/deploy \
-                    1>>$log_file \
-                    2>>$log_file
-            fi
-            cp $ear $resin_home/deploy \
-                1>>$log_file \
-                2>>$log_file
-            ;;
-        *)
-            print "Deployment is only implemented for Resin and Tomcat so far."
-            ;;
-    esac
-
-    run rm -rf ${dir}
-}
-
-## $1 : dir of the webapp 
-function add_memcached_support() {
-    if [[ "$do_not_add_memcached_support" == "1" ]]; then
-        return
-    fi
-
-    if [ ! -d "$1" ]; then
-        log $1 "doesn't exist"
-        return
-    fi
-
-    local exempt_from_memcached_list="
-      escenic escenic-admin indexer-webservice indexer-webapp studio
-      inpage-ws dashboard
-    "
-
-    for el in $exempt_from_memcached_list; do
-        if [[ $(basename $1) == "$el" ]]; then
-          return
-        fi
-    done
-
-    log "Adding memcached support in $1 ..."
-    local dir=$1/WEB-INF/localconfig/neo/xredsys/presentation/cache
-    run mkdir -p $dir
-    local file=$dir/PresentationArticleCache.properties
-
-    if [[ -e $file && $(grep "\$class" $file | wc -l) -gt 0 ]]; then
-        sed -i "s#\$class=.*#\$class=neo.util.cache.Memcached#g" $file
-    else
-        echo "\$class=neo.util.cache.Memcached" >> $file
-    fi
-
-    exit_on_error "sed on $file"
-}
-
 # Returns the file (can be a directory) passed to the function only
 # if it's the actual file/directory and not a link to it. If the
 # passed file is a link, the link target is returned instead.
 #
 # $1 - the file (which could be a link)
-function get_actual_file()
-{
+function get_actual_file() {
     if [ -h ${1} ]; then
         dir=$(dirname $1)
         real_file=$(ls -l ${1} | awk '{print $11}')
@@ -651,7 +531,7 @@ function get_actual_file()
         # preserve the cwd, therefore, we're doing the "cd /" in a
         # subshell.
         real_file=$(
-            cd / 
+            cd /
             if [ ! -e ${real_file} ]; then
                 real_file=${dir}/${real_file}
             fi
@@ -662,652 +542,49 @@ function get_actual_file()
     else
         real_file=${1}
     fi
-    
+
     echo ${real_file}
 }
 
-function backup_type()
-{
-   message="Backing up the $instance instance of $type on $HOSTNAME ..."
-   print $message
-   log $message
+function set_type_command_and_instance() {
+    local next_is_type=0
+    local next_is_instance=0
+    local next_is_publication=0
+    local next_is_resource=0
+    local next_is_http_user=0
+    local next_is_http_password=0
+    local next_is_file=0
 
-   if [ "$type" == "rmi-hub" ]; then
-       ensure_that_required_fields_are_set $hub_required_fields
-   elif [ "$type" == "search" ]; then
-        # TODO trim & tun the default parameters for the search
-        # instance.
-       ensure_that_required_fields_are_set $engine_required_fields
-   elif [ "$type" == "engine" ]; then
-       ensure_that_required_fields_are_set $engine_required_fields
-   elif [ "$type" == "analysis" ]; then
-       ensure_that_required_fields_are_set $analysis_required_fields
-   fi
-    
-   # TODO add support for backup_dir in ece.conf
-   if [ -z "$backup_dir" ]; then
-       backup_dir=/var/backups/escenic
-   fi
-   if [ ! -w $backup_dir ]; then
-       print $backup_dir "must exist & be write-able for $USER"
-       exit 1
-   fi
-
-   if [ "$appserver" == "tomcat" ]; then
-       if [ ! -d $tomcat_base/conf ]; then
-           print $tomcat_base/conf "doesn't exist :-("
-           print "check your ece.conf the $instance instance of type $type"
-           exit 1
-       fi
-       
-       connect_string=$(find $tomcat_base/conf | xargs \
-           grep jdbc | \
-           grep url | \
-           head -1 | \
-           cut -d'"' -f2)
-       db_port=$(echo $connect_string | cut -d':' -f4 | cut -d'/' -f1)
-       db=$(echo $connect_string | cut -d'/' -f4 | cut -d'?' -f1)
-       db_host=$(echo $connect_string | cut -d'/' -f3- | cut -d':' -f1)
-
-       db_user=$(find $tomcat_base/conf -name "*.xml" | \
-           grep -v tomcat-users.xml | xargs \
-           grep username | \
-           grep -v \<user | \
-           head -1 | \
-           cut -d'"' -f2)
-       db_password=$(find $tomcat_base/conf -name "*.xml" | \
-           grep -v tomcat-users.xml | xargs \
-           grep password | \
-           head -1 | \
-           cut -d'"' -f2)
-
-       db_backup_file=$backup_dir/${db}-$(date --iso).sql.gz
-       mysqldump -u ${db_user} \
-           -p${db_password} \
-           -h ${db_host} \
-           -P ${db_port} ${db} | \
-           gzip - \
-           > $db_backup_file
-
-       print "Database dumped: $db_backup_file"
-   fi
-   
-   archive_file=$backup_dir/${type}-${instance}-backup-$(date --iso).tar
-   possible_backup="
-${escenic_conf_dir} 
-/opt/escenic 
-/etc/init.d/ece
-/etc/default/ece
-/etc/inti.d/rmi-hub
-/var/lib/escenic
-"
-   actual_backup=""
-   for el in $possible_backup; do
-       if [ "$el" == "/opt/escenic" -a $backup_exclude_binaries -eq 1 ]; then
-           continue
-       elif [ -r "$el" ]; then
-           actual_backup="$el $actual_backup"
-       fi
-   done
-
-   if [ "$appserver" == "tomcat" -a "$backup_exclude_binaries" -eq 0 ]; then
-       actual_backup="$(get_actual_file $tomcat_home) $tomcat_base $actual_backup"
-   fi
-
-   print "Creating snapshot ... (this will take a while)"
-   run tar cf $archive_file \
-       $actual_backup \
-       $db_backup_file
-
-   message="Backup ready: $archive_file"
-   print $message
-   log $message
-   print "The backup arhcive includes:"
-   print "- Database snapshot"
-   print "- All Solr & Escenic data files from /var/lib/escenic"
-
-   if [ "$backup_exclude_binaries" -eq 0 ]; then
-       print "- All app servers in /opt"
-       print "- All Escenic binaries & publication templates in /opt/escenic"
-   fi
-   
-   print "- All configuration in ${escenic_conf_dir} and /etc/default/ece"
-   print "- All bootstrap scripts from /etc/init.d"
-   print "Enjoy!"
- }
-
-
-function start_type()
-{
-    unset CLASSPATH
-    message="Starting the $instance instance of $type on $HOSTNAME ..."
-    print_and_log $message
-    
-    if [ "$type" == "rmi-hub" ]; then
-        ensure_that_required_fields_are_set $hub_required_fields
-
-        if [ -r $rmi_hub_conf ]; then
-            export CLASSPATH=$rmi_hub_conf:$CLASSPATH
-        else
-            print $rmi_hub_conf "must point to a valid Nursery configuration"
-            print "for the rmi-hub, you may copy the one found in"
-            print "$ece_home/contrib/rmi-hub/config."
-            print "Exiting :-("
-            exit 1
-        fi
-        
-        for el in $rmi_hub_home/lib/*.jar; do
-            export CLASSPATH=$CLASSPATH:$el
-        done
-
-        $java_home/bin/java \
-            -Djava.rmi.server.hostname=${ece_server_hostname} \
-            neo.nursery.GlobalBus /Initial \
-            1>>$log_file \
-            2>>$log_file & pid=$!
-        
-        echo $pid > $pid_file
-        exit 0
-
-    elif [ "$type" == "search" ]; then
-        # TODO trim & tun the default parameters for the search
-        # instance.
-        ensure_that_required_fields_are_set $engine_required_fields
-    elif [ "$type" == "engine" ]; then
-        ensure_that_required_fields_are_set $engine_required_fields
-        if [ ! -d "$ece_security_configuration_dir" ] ; then
-            print "ece_security_configuration_dir $ece_security_configuration_dir"
-            print "did not exist."
-            print "Exiting :-("
-            exit 1
-        fi
-    elif [ "$type" == "analysis" ]; then
-        ensure_that_required_fields_are_set $analysis_required_fields
-    fi
-
-    # indexer and engine are treated the same
-    case $appserver in
-        tomcat)
-            # Tomcat respects JAVA_OPTS set in configure(), so no need
-            # to set them here.
-
-            if [ ! -x $tomcat_home/bin/catalina.sh ]; then
-                print "$tomcat_home/bin/catalina.sh was not executable"
-                print "unable to start tomcat"
-                exit 1
-            fi
-
-            # We call run here to get the log output to the stdout log
-            $tomcat_home/bin/catalina.sh run \
-                1>>$log_file \
-                2>>$log_file & pid=$!
-            ;;
-        oc4j)
-            export OC4J_JVM_ARGS=$ece_args
-            $oc4j_home/bin/oc4j -start\
-                1>>$log_file\
-                2>>$log_file & pid=$!
-            ;;
-        resin)
-            # Resin has stared insisting on a -J prefix of the -D
-            # prefixes :-) Tested with Resin 3.0.25
-            resin_ece_args=`echo $ece_args | sed 's/-D/-J-D/g'`
-            
-            # works for Resin 3.0
-            if [ -e $resin_home/bin/wrapper.pl ]; then
-                exec perl $resin_home/bin/wrapper.pl \
-                    -chdir \
-                    -name httpd \
-                    -class com.caucho.server.resin.Resin \
-                    $resin_ece_args ${1+"$@"} \
-                    1>>$log_file \
-                    2>>$log_file & pid=$!
-            else
-                # works for Resin 3.1
-                $java_home/bin/java $ece_args \
-                    -jar $resin_home/lib/resin.jar \
-                    start \
-                    1>>$log_file \
-                    2>>$log_file & pid=$!
-            fi
-            ;;
-        jboss)
-            $jboss_home/bin/run.sh \
-                -b 0.0.0.0 \
-                -c $jboss_conf \
-                1>>$log_file \
-                2>>$log_file & pid=$!
-            ;;
-        *)
-            echo "" # extra line feed, because of the echo -n above
-            print "No appserver is defined in $ece_conf"
-            exit 1
-    esac
-    
-    if [ $pid ]; then
-        verify_that_directory_and_file_are_writeable $pid_file
-        echo $pid > $pid_file
-    fi
-    
-    exit_on_error $message
-}
-
-function stop_type()
-{
-    message="Stopping the $instance instance of $type on $HOSTNAME ..."
-
-    if [ -n "$type_pid" ]; then
-        log $message
-        print $message
-
-        if [ -r $pid_file ]; then
-            if [ "$type_pid" != "`cat $pid_file`" ]; then
-                print "Is running, but was not started with `basename $0`"
-                print "system PID $ece_pid differs from the PID in $pid_file"
-                print "removing dangling PID file $pid_file. "
-                print "In future, be sure to use $0 to start "
-                print "and stop your $type"
-                run kill $type_pid
-                rm $pid_file
-                return
-            fi
-        fi
-
-        for i in {0..5}; do
-            set_type_pid
-            
-            if [ -n "$type_pid" ]; then
-                run kill $type_pid
-            else
-                debug "Previous gracious kill attempt of $instance succeeded."
-                break
-            fi
-            
-            sleep 1
-        done
-
-        set_type_pid
-        if [ -n "$type_pid" ]; then
-            print_and_log "I could not stop $type instance $instance gracefully,"
-            print_and_log "I will now use force."
-            run kill -9 $type_pid
-        fi
-        
-
-        if [ -e $pid_file ]; then
-            run rm $pid_file
-        fi
-    else
-        print "The $instance instance of $type on $HOSTNAME is NOT running"
-    fi
-    
-    exit_on_error $message
-}
-
-function kill_type()
-{
-    if [ -n "$type_pid" ]; then
-        message="Using force to stop the $instance instance of $type on $HOSTNAME ..."
-        log $message
-        print $message
-        kill -9 $type_pid
-        if [ -w $pid_file ]; then
-            rm $pid_file
-        fi
-    else
-        print "No $instance instance of $type on $HOSTNAME to be killed"
-    fi
-    
-    exit_on_error "kill_type"
-}
-
-function get_info_for_type()
-{
-    print "Current instance:    ${instance}"
-    print "Instances available on $HOSTNAME: $(get_instance_list)"
-    print "Conf files parsed: ${ece_conf_files_read[@]}"
-    
-    if [ -n "${ece_home}" ]; then
-        print "ECE location: $ece_home"
-    fi
-    if [[ -n "${assemblytool_home}" && -e "${assemblytool_home}" ]]; then
-        print "Assembly Tool location: $assemblytool_home"
-    fi
-    if [ -n "${java_home}" ]; then
-        print "Java location: $java_home"
-    fi
-    if [ -n "${appserver}" ]; then
-        print "Application server:"
-        set_type_port
-        set_type_pid
-        print "|-> Status:" $(get_status)
-        print "|-> Port:" $port
-        print "|-> PID:" $type_pid
-        print "|-> Type: " $appserver
-        
-        case "$appserver" in
-            tomcat)
-                if [ -n "${tomcat_home}" ]; then
-                    print "|-> Tomcat home:" $tomcat_home
-                    print "|-> Tomcat base:" $tomcat_base
-                fi
-            ;;
-            resin)
-                if [ -n "${resin_home}" ]; then
-                    print "  |-> Resin home:" $resin_home
-                fi
-                ;;
-        esac
-    fi
-}
-
-function restart_type()
-{
-    stop_type
-
-    # sometimes the JVM refuses to shut down when doing a graceful
-    # kill, therefore, if it's still running after the sleep above, we
-    # use brute force to kill it.
-    set_type_pid
-    if [ -n "$type_pid" ]; then
-        message="The $instance instance of $type failed to stop gracefully"
-        print_and_log $message
-        kill_type
-    fi
-    
-    start_type
-}    
-
-assemble_attempts=0
-
-function assemble()
-{
-    if [ "$assemble_attempts" -gt 1 ]; then
-        print "I've tried to assemble twice now and FAILED :-("
-        print "You probably have multiple versions of one or more plugins"
-        print "Check your plugins directory, sort it out and try again."
-        exit 1
-    fi
-    assemble_attempts=$(( $assemble_attempts + 1 ))
-    
-    if [[ "$type" != "engine" && "$type" != "search" ]]; then
-        print "You cannot assemble instances of type $type"
-        exit 1
-    fi
-
-    message="Assembling your EAR file"
-    print $message "..."
-    log $message "..." >> $log_file
-
-    cd $assemblytool_home && \
-        ant -q ear -DskipRedundancyCheck=true \
-        1>>$log_file \
-        2>>$log_file
-    exit_on_error "$message"
-
-    # test to see if the new versions of ECE & plugins are upgrades of
-    # the previous ones
-    duplicates_found=0
-    known_unharmful_duplicates="activation- $'\n' ehcache-$'\n' stax-api-$'\n'"
-    
-    cd $assemblytool_home/dist/.work/ear/lib
-    for el in *.jar; do
-        jar=$(basename $(echo $el | sed  -e  's/[0-9]//g') .jar | sed 's/\.//g')
-        if [ $(echo $known_unharmful_duplicates | grep $jar | wc -l) -gt 0 ]; then
-            continue
-        fi
-        if [ $(\ls *.jar | grep "^${jar}[0-9]" | wc -l) -gt 1 ]; then
-            duplicates_found=1
-            debug "More than one version of $jar"
-        fi
-    done
-
-    if [ "$duplicates_found" -eq 1 ]; then
-        print "Multiple versions of ECE and/or 3rd party libraries found."
-        print "Remember, you need to run '$(basename $0) clean assemble' when "
-        print "upgrading either ECE or one of the plugins."
-        print "I will now clean it up for you and re-run the assembly."
-        clean_up
-        assemble
-    fi
-    
-    mkdir -p $ear_cache_dir/
-    exit_on_error "creating $ear_cache_dir"
-
-    cp $assemblytool_home/dist/engine.ear $cache_dir
-    exit_on_error "copying ear to $ear_cache_dir"
-
-    debug $assemblytool_home/dist/engine.ear "is now ready"
-}
-
-# creates DEB and RPM packages suitable for deploying any kind of ECE
-# instance that was previously assembled.
-function create_packages()
-{
-    local ear=$cache_dir/engine.ear
-    if [ ! -e $ear ]; then
-        print_and_log "$ear does not exist. "
-        print_and_log "Did you run '"`basename $0`" -i" $instance "assemble'?"
-        exit 1
-    fi
-
-    local dir=$(mktemp -d)
-    local package_dir=$dir/debian
-    local package_name=""
-    
-    if [ "$type" == "engine" ]; then
-        package_name="escenic-content-engine-${instance}"
-    elif [ "$type" == "search" ]; then
-        package_name="escenic-search-engine-${instance}"
-    elif [ "$type" == "rmi-hub" ]; then
-        package_name="escenic-rmi-hub"
-    elif [ "$type" == "analysis" ]; then
-        package_name="escenic-analysis-engine-${instance}"
-    fi
-    
-    # TODO the version might be a bit on the extreme side. Could come
-    # from the SCM (if available)
-    local version=$(date +%s)
-
-    run mkdir -p $package_dir/DEBIAN
-    cat > $package_dir/DEBIAN/control <<EOF
-Package: $package_name
-Version: $version
-Section: base
-Priority: optional
-Architecture: all
-Maintainer: Torstein Krause Johansen <tkj@vizrt.com>
-Description: The Escenic Content Engine of type ${type}
-  for the ${instance} instance. Built on $HOSTNAME
-EOF
-
-    case $appserver in
-        tomcat)
-            local tomcat_base_dir=${package_dir}${tomcat_base}
-            local tomcat_escenic_dir=${tomcat_base_dir}/escenic
-
-            # lib
-            run mkdir -p ${tomcat_escenic_dir}
-            run cd ${tomcat_escenic_dir}
-            run jar xf ${ear} lib
-
-            # war
-            run mkdir -p ${tomcat_base_dir}/webapps
-            run cd ${tomcat_base_dir}/webapps
-            for el in $(jar tf ${ear} | grep .war$); do
-                if [ -n "${deploy_webapp_white_list}" ]; then
-                    for ele in $deploy_webapp_white_list; do
-                        if [ ${el} == ${ele}.war ]; then
-                            run jar xf ${ear} ${el}
-                        fi
-                    done
-                else
-                    run jar xf ${ear} ${el}
-                fi
-            done
-
-            # putting this block here so that anything overridden in
-            # tomcat_base takes precedence over tomcat_home
-            if [ "${everything_but_the_kitchen_sink}" -eq 1 ]; then
-                (
-                    local tomcat_home_dir=${package_dir}${tomcat_home}
-                    run mkdir -p ${tomcat_home_dir}
-                    run cd ${tomcat_home_dir}
-                    run cp -r ${tomcat_home}/{bin,lib} ${tomcat_home_dir}
-
-                    local etc_escenic_dir=${package_dir}${escenic_conf_dir}
-                    run mkdir -p ${etc_escenic_dir}
-                    cd ${etc_escenic_dir}
-                    run cp -r ${escenic_conf_dir}/{ece,ece-${instance}}.conf \
-                        ${etc_escenic_dir}
-
-                    run mkdir -p ${etc_escenic_dir}/engine
-                    run cp -r ${escenic_conf_dir}/engine/common \
-                        ${etc_escenic_dir}
-                    
-                    run mkdir -p ${etc_escenic_dir}/engine/instance
-                    run cp -r ${escenic_conf_dir}/engine/instance/${instance} \
-                        ${etc_escenic_dir}
-                )
-            fi
-            
-            # copy these from the current configuration: bin, conf
-            run cp -r ${tomcat_base}/{bin,conf} ${tomcat_base_dir}
-
-            # these just need to be there: logs, temp
-            run mkdir ${tomcat_base_dir}/{logs,temp}
-
-            # build the packages
-            cd ${dir}
-            run dpkg-deb --build debian
-            local deb_package=${package_name}-${version}.deb
-            run mv debian.deb ${deb_package}
-            
-            if [[ -x /usr/bin/alien && -x /usr/bin/fakeroot ]]; then
-                run fakeroot alien --to-rpm --scripts ${deb_package}
-                run mv *.rpm ${cache_dir}
-                print "RPM package of your $instance $type instance with build"
-                print "version $version is now available:"
-                print $(echo /var/cache/escenic/${package_name}-${version}*.rpm)
-            fi
-            
-            mv *.deb ${cache_dir}
-            print "DEB package of your $instance $type instance with with build"
-            print "version $version is now available:"
-            print /var/cache/escenic/${deb_package}
-            ;;
-        *)
-            print "Package creation is only supported on Tomcat so far."
-            ;;
-    esac
-
-    run rm -rf ${dir}
-}
-
-function get_log4j_log()
-{
-    for el in $log_file_list; do
-        if [ -r $el ]; then
-            echo $el
-            return
-        fi
-    done
-
-    echo ""
-}
-
-function tail_messages_log()
-{
-    log4j_log=$(get_log4j_log)
-    print "tailing $log4j_log"
-    tail -f $log4j_log
-}
-
-function tail_out_log()
-{
-    tail_list=$log_file
-
-    # if needs be, we can add more system out logs here. For now,
-    # we're sticking with the default one.
-    
-    print "Tailing the system out log $tail_list"
-    tail -f $tail_list
-}
-
-function get_app_log()
-{
-    if [ "$appserver" == "tomcat" ]; then
-        log_file=$tomcat_base/logs/localhost.`date +%F`.log
-    elif [ "$appserver" == "resin" -a -e $resin_home/log/jvm-default.log ]; then
-        log_file=$resin_home/log/jvm-default.log
-    else
-        print "I don't know where the logs for $appserver are."
-        print "Ask support@escenic.com to add support for $appserver in "
-        print "tail_app_log()"
-        exit 1
-    fi
-
-    echo $log_file
-}
-
-
-function tail_app_log()
-{
-    if [ "$type" == "rmi-hub" ]; then
-        print "There is no application server log for $type"
-        exit 1
-    fi
-    
-    print "Tailing the application server log $(get_app_log)"
-    tail -f $(get_app_log)
-}
-
-function make_thread_dump()
-{
-
-    if [ -n "$type_pid" ]; then
-        print "Thread dump (PID" $type_pid") written to system out log."
-        print "Type 'ece -t $type -i $instance outlog' to see it or view"
-        print $log_file "directly."
-
-        if [ -x $java_home/bin/jstack ]; then
-            jstack -l $type_pid >> $log_file
-        else
-            kill -QUIT $type_pid >> $log_file
-        fi
-    else
-        print "$(get_status)"
-    fi
-}
-
-function set_type_command_and_instance()
-{
-    next_is_type=0
-    next_is_instance=0
-    next_is_publication=0
-    next_is_resource=0
-    next_is_http_user=0
-    next_is_http_password=0
-    
     for el in $@; do
         if [ "$el" == "-v" -o "$el" == "--verbose" ]; then
-            verbose=1
+            debug=1
             continue
         fi
-        
+
         if [ "$el" == "--full" ]; then
             everything_but_the_kitchen_sink=1
             continue
         fi
-        
+
+        if [ "$el" == "-f" -o $el == "--file" -o $el == "--uri" ]; then
+          next_is_file=1
+          continue
+        fi
+
         if [ "$el" == "-q" -o $el == "--quiet" ]; then
             quiet=1
             continue
         fi
-        
+
         if [ "$el" == "--help" ]; then
             command=help
             continue
+        fi
+
+        if [ "$next_is_file" -eq 1 ]; then
+          file=$el
+          next_is_file=0
+          continue
         fi
 
         if [ "$next_is_type" -eq 1 ]; then
@@ -1315,37 +592,37 @@ function set_type_command_and_instance()
             next_is_type=0
             continue
         fi
-        
+
         if [ "$next_is_http_user" -eq 1 ]; then
             http_user=$el
             next_is_http_user=0
             continue
         fi
-        
+
         if [ "$next_is_http_password" -eq 1 ]; then
             http_password=$el
             next_is_http_password=0
             continue
         fi
-        
+
         if [ "$next_is_instance" -eq 1 ]; then
             instance=$el
             next_is_instance=0
             continue
         fi
-        
+
         if [ "$next_is_publication" -eq 1 ]; then
             publication=$el
             next_is_publication=0
             continue
         fi
-        
+
         if [ "$next_is_resource" -eq 1 ]; then
             resource=$el
             next_is_resource=0
             continue
         fi
-        
+
         if [ "$el" == "-t" -o "$el"  == "--type" ]; then
             next_is_type=1
             continue
@@ -1366,21 +643,21 @@ function set_type_command_and_instance()
         else
             next_is_publication=0
         fi
-        
+
         if [ "$el" == "-r" -o "$el" == "--publication-resource" ]; then
             next_is_resource=1
             continue
         else
             next_is_resource=0
         fi
-        
+
         if [ "$el" == "-u" -o "$el" == "--user" ]; then
             next_is_http_user=1
             continue
         else
             next_is_http_user=0
         fi
-        
+
         if [ "$el" == "-w" -o "$el" == "--password" ]; then
             next_is_http_password=1
             continue
@@ -1391,8 +668,29 @@ function set_type_command_and_instance()
         if [ "$el" == "--exclude-binaries" ]; then
             backup_exclude_binaries=1
             continue
+        elif [ "$el" == "--exclude-solr" ]; then
+            backup_exclude_solr=1
+            continue
+        elif [ "$el" == "--exclude-conf" ]; then
+            backup_exclude_conf=1
+            continue
+        elif [ "$el" == "--exclude-multimedia" ]; then
+            backup_exclude_multimedia=1
+            continue
+        elif [ "$el" == "--exclude-db" ]; then
+            backup_exclude_db=1
+            continue
+        elif [ "$el" == "--exclude-init" ]; then
+            backup_exclude_init=1
+            continue
+        elif [ "$el" == "--exclude-state" ]; then
+            backup_exclude_state=1
+            continue
+        elif [ "$el" == "--version" -o "$el" == "-V" ]; then
+             echo "Version:" $ece_scripts_version
+             exit 0
         fi
-        
+
         # the only thing left at this point, is the command
         command="$command $el"
     done
@@ -1403,7 +701,7 @@ function set_type_command_and_instance()
     if [ "$instance" == "default" ]; then
         debug "Trying to determine instance name"
         local instance_list=$(get_instance_list)
-        
+
         if [ $(echo $instance_list | grep ' ' | wc -l) -eq 0 ]; then
             instance=$instance_list
             if [ -z "$instance" ] ; then
@@ -1414,228 +712,74 @@ function set_type_command_and_instance()
     fi
 }
 
-function clean_up()
-{
-    if [ "$type" == "engine" ]; then
-        print "Cleaning up generated files in $assemblytool_home ..." 
-        run cd $assemblytool_home
-        run ant clean
-    fi
-
-    if [ -d /var/cache/escenic ]; then
-        print "Cleaning up ear, deb and rpm files in /var/cache/escenic ..." 
-        run rm -rf /var/cache/escenic/*.{rpm,deb,ear}
-    fi
-}
-
-function set_id()
-{
+function set_id() {
     if [ "$instance" == "default" ]; then
-        id="["`basename $0`"#${type}]"
+        id="["$(basename $0)"#${type}]"
     else
-        id="["`basename $0`"#${type}-${instance}]"
+        id="["$(basename $0)"#${type}-${instance}]"
     fi
-    
+
     debug type is $type \
         and command is $command \
         and instance is $instance
 }
 
-function get_status()
-{
+function get_status() {
     if [ -z "$type_pid" ]; then
         echo "DOWN"
         exit 0
     elif [ -r $pid_file ]; then
-        
+
         if [ "$type_pid" != `cat $pid_file` ]; then
-            echo "Is running, but was not started with `basename $0`"
+            echo "Is running, but was not started with $(basename $0)"
             echo "system PID $ece_id differs from the PID in $pid_file"
             exit 1
         fi
     else
         echo $pid_file "did not exist, "
         echo "the ${instance} instance of ${type} is running with PID $type_pid"
-        echo "but hasn't been started properly with `basename $0`"
+        echo "but hasn't been started properly with $(basename $0)"
         exit 1
     fi
 
-    now=`date +%s`
-    started=`stat -c %Y $pid_file`
-    seconds=$(( now - started ))
-    days=$(( seconds / ( 60 * 60 * 24 ) ))
-    seconds_left=$(( seconds - ( $days * 60 * 60 * 24 ) ))
-    hours=$(( seconds_left / ( 60 * 60 ) ))
-    seconds_left=$(( seconds_left - ( $hours * 60 * 60 ) ))
-    minutes=$(( seconds_left / 60 ))
-    seconds_left=$(( seconds_left - $minutes * 60 ))
+    local now=`date +%s`
+    local started=`stat -c %Y $pid_file`
+    local seconds=$(( now - started ))
+    local days=$(( seconds / ( 60 * 60 * 24 ) ))
+    local seconds_left=$(( seconds - ( $days * 60 * 60 * 24 ) ))
+    local hours=$(( seconds_left / ( 60 * 60 ) ))
+    local seconds_left=$(( seconds_left - ( $hours * 60 * 60 ) ))
+    local minutes=$(( seconds_left / 60 ))
+    local seconds_left=$(( seconds_left - $minutes * 60 ))
 
     echo "UP" ${days}d ${hours}h ${minutes}m ${seconds_left}s
 }
 
-function list_versions()
-{
-    if [ -z "$type_pid" ]; then
-        print "$instance instance of $type on $HOSTNAME is NOT running"
-        exit 1
-    fi
-    
-    set_type_port
-    
-    version_manager=browser/Global/neo/io/managers/VersionManager
-    url=$(get_escenic_admin_url)/$version_manager
-        
-    print "Installed on the ${type} running on ${host}:${port} is:"
-    wget $wget_auth -O - $url  2>/dev/null | \
-        grep "\[\[" | \
-        sed 's/\[//g' | \
-        sed 's/\]//g' | \
-        sed 's/Name\=io/Name\=content-engine/g' | \
-        sed 's/Name\=//g' | \
-        sed 's/\;\ Version\=/\ /g' | \
-        awk -F',' '{for (i = 1; i <= NF; i++) print "   * " $i;}' | \
-        # This is a hack since that for some reason, cannot get
-        # sub(/^[ \t]+/, "") to work inside the loop for $i, it seems
-        # to always operate on the incoming line.
-        sed 's/\*\ \ \ /\*/g' | \
-        sort
-}
-
-function update_publication_resources()
-{
-    if [[ ! -r $resource && -z "$1" ]]; then
-        print $resource "doesn't exist. I will exit :-("
-        exit 1
-    fi
-
-    if [ -z $publication ]; then
-        print "You must specify which publication to update (-p <publication>)"
-        exit 1
-    fi
-    
-    local url=$(get_escenic_admin_url)/publication-resources
-
-    case "$(basename $resource)" in
-        content-type)
-            url=${url}/${publication}/escenic/content-type
-            ;;
-        feature)
-            url=${url}/${publication}/escenic/feature
-            ;;
-        layout)
-            url=${url}/${publication}/escenic/layout
-            ;;
-        layout-group)
-            url=${url}/${publication}/escenic/layout-group
-            ;;
-        image-version)
-            url=${url}/${publication}/escenic/image-version
-            ;;
-        menu)
-            url=${url}/${publication}/escenic/plugin/menu
-            ;;
-        security)
-            url=${url}/${publication}/escenic/plugin/community/security
-            ;;
-        root-section-parameters)
-            do_put=true
-            url=$(get_escenic_admin_url)
-            url=${url}/section-parameters-declared/${publication}
-            ;;
-        *)
-            print "Invalid resource: $(basename $resource) :-("
-            exit 1
-    esac        
-
-    local tmp_dir=$(mktemp -d)
-    
-    if [ $1 ]; then
-        if [[ -z "$EDITOR" || ! -x $(which $EDITOR) ]]; then
-            print "You must have a valid editor defined in your EDITOR variable"
-            exit 1
-        fi
-        
-        run cd $tmp_dir;
-        run wget $wget_auth $url -O ${resource}
-        md5sum ${resource} > ${resource}.md5sum
-        exit_on_error "md5sum ${resource}"
-
-        $EDITOR ${resource}
-        md5sum -c ${resource}.md5sum \
-            1>>$log_file \
-            2>>$log_file
-        if [ $? -eq 0 ]; then
-            print "You didn't make any changes to ${resource}, I will exit."
-            exit 1
-        fi
-    fi
-    
-    print "Updating the $(basename $resource) resource for the $publication" \
-        "publication ..."
-    
-    debug POSTing $resource to $url
-    if [[ -n "$do_put" && "$do_put" == "true" ]]; then
-        curl -T ${resource} \
-          ${curl_auth} \
-            ${url} \
-            1>>$log_file 2>>$log_file
-    else
-        wget $wget_auth \
-            -O - \
-            --post-file ${resource} \
-            $url \
-            1>>$log_file 2>>$log_file
-    fi
-
-    if [ -d $tmp_dir ]; then
-        run rm -rf $tmp_dir
-    fi
-}
-
-function show_all_log_paths()
-{
-    if [ "$quiet" -eq 0 ]; then
-        print "System out log: "$log_file
-        print "App server log: "$(get_app_log)
-        print "log4j log:  "$(get_log4j_log)
-    else
-        echo $log_file
-        echo $(get_app_log)
-        echo $(get_log4j_log)
-    fi
-}
-
-function read_rc_file_if_present()
-{
+function read_rc_file_if_present() {
     local rc_file=$HOME/.ecerc
     if [ -r $rc_file ]; then
         source $rc_file
     fi
 }
 
-function get_escenic_admin_url()
-{
+function get_escenic_admin_url() {
     set_type_port
     local url=http://${host}:${port}/escenic-admin
     echo ${url}
 }
 
-function flush_caches()
-{
-    if [ "${type}" != "engine" ]; then
-        print "You cannot flush the caches of a ${type} instance"
-        return
-    fi
-    
-    print "Flushing all of ${instance}'s caches on $HOSTNAME"
-    local url=$(get_escenic_admin_url)/do/publication/clearallcaches
-    wget $wget_auth \
-        -O - \
-        --post-data='confirm=Confirm' \
-        $url \
-        1>>$log_file 2>>$log_file
+function show_all_publications() {
+  set_type_port
+  print "These are all the publications on ${instance}:"
+  get_publication_list ${port}
 }
 
+function show_all_deployments() {
+  print "These are all the publications on ${instance}:"
+  cat $(get_deployment_log)
+}
+
+init
 read_rc_file_if_present
 set_type_command_and_instance $@
 set_id
@@ -1643,62 +787,6 @@ set_common_settings
 set_type_settings
 set_instance_settings
 sanity_check
-
-function print_help()
-{
-    echo "Usage: $0 [-t <type>] [-i <instance>] <command>"
-    echo ""
-    echo "DESCRIPTION"
-    echo " -t --type <type>"
-    echo "      The following types are available:"
-    echo "      engine  -  The Escenic Content Engine, this is the default"
-    echo "                 and is the assumed type if none is specified."
-    echo "      search  -  A standalone search indexer and solr instance"
-    echo "      rmi-hub -  The RMI hub responsible for the internal "
-    echo "                 communication between the ECE instances."
-    echo "      analysis - The Escenic Analysis Engine also knows as 'Stats'"
-    echo ""
-    echo " -i --instance <instance>" 
-    echo "      The type instance, such as editor1, web1 or search1"
-    echo ""
-    echo " -p --publication <publication>" 
-    echo "      Needed only for updating publication resources"
-    echo ""
-    echo " -r --resource <resource>" 
-    echo "      Used for updating publication resources."
-    echo "      Must be one of: content-type, feature, layout, layout-group"
-    echo "                      image-version, menu"
-    echo " -q --quiet"
-    echo "      Makes $(basename $0) as quiet as possible."
-    echo ""
-    echo " -v --verbose"
-    echo "      Prints out debug statements, useful for debugging."
-    echo ""
-    echo "The following commands are available:"
-    echo "   applog     the type's app server log"
-    echo "   assemble   runs the Assembly Tool *)"
-    echo "   backup     backs up an entire instance (takes time)"
-    echo "   clean      removes temporary files created by $0 *)"
-    echo "   deploy     deploys the assembled EAR *)"
-    echo "   edit       lets you edit a publication resource"
-    echo "   flush      flushes all ECE caches ('Clear all caches') *)"
-    echo "   help       prints this help screen"
-    echo "   info       prints various info about the selected ECE instance"
-    echo "   kill       uses force to stop the type"
-    echo "   log        the type's log4j log **)"
-    echo "   loglist    list all the log paths"
-    echo "   outlog     the $id script log (system out log)"
-    echo "   restart    restarts the type"
-    echo "   start      starts the type"
-    echo "   status     checks if the type is running"
-    echo "   stop       stops the type"
-    echo "   threaddump write a thread dump to standard out (system out log)"
-    echo "   update     update publication resources"
-    echo "   versions   lists the ECE component versions"
-    echo ""
-    echo "*) only applicable if type is 'engine'"
-    echo "**) not applicable if type is 'rmi-hub'"
-}    
 
 for el in $command; do
     case "$el" in
@@ -1720,8 +808,14 @@ for el in $command; do
         log)
             tail_messages_log
             ;;
-        loglist)
+        list-logs)
             show_all_log_paths
+            ;;
+        list-publications)
+            show_all_publications
+            ;;
+        list-deployments)
+            show_all_deployments
             ;;
         outlog)
             tail_out_log
@@ -1750,6 +844,12 @@ for el in $command; do
         versions)
             list_versions
             ;;
+        list-instances)
+            print $(get_instance_list)
+            ;;
+        remove-old-log-files)
+            remove_old_log_files
+            ;;
         update)
             update_publication_resources
             ;;
@@ -1757,11 +857,13 @@ for el in $command; do
             update_publication_resources "edit_first"
             ;;
         backup)
-            clean_up
             backup_type
             ;;
         flush)
             flush_caches
+            ;;
+        top)
+            run_ece_top
             ;;
         help)
             print_help
@@ -1774,4 +876,3 @@ for el in $command; do
 done
 
 exit 0
-

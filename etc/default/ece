@@ -20,3 +20,7 @@ ece_script=/usr/bin/ece
 ece_unix_group=escenic
 ece_unix_user=escenic
 
+# Do you want cron to remove (5 days) old log files every day?
+# (default is yes, i.e. 1. Set 0 to turn this off)
+remove_old_log_files=1
+

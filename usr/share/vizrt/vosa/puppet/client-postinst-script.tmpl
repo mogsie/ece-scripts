@@ -22,8 +22,8 @@ logdir = /var/log/puppet
 vardir = /var/lib/puppet
 ssldir = /var/lib/puppet/ssl
 rundir = /var/run/puppet
-factpath = $vardir/lib/facter
-templatedir = $confdir/templates
+factpath = \$vardir/lib/facter
+templatedir = \$confdir/templates
 prerun_command = /etc/puppet/etckeeper-commit-pre
 postrun_command = /etc/puppet/etckeeper-commit-post
 
@@ -34,7 +34,8 @@ ssl_client_verify_header = SSL_CLIENT_VERIFY
 [agent]
 server = @@HOSTNAME@@
 certname = "generic-@@HOSTNAME@@-client"
-node_name_fact = "fqdn"
+node_name = "facter"
+node_name_fact = "hostname"
 runinterval = 15
 environment = production
 EOF
@@ -63,8 +64,4 @@ ssh -F $2/ssh.conf root@guest rm -f /usr/sbin/policy-rc.d || exit 2
 
 # Make it possible to start puppet
 ssh -F $2/ssh.conf root@guest perl -pi -e 's/^START=.*/START=yes/' /etc/default/puppet || exit 2
-
-# Finally start puppet!!!
-ssh -F $2/ssh.conf root@guest /etc/init.d/puppet start || exit 2
-
 
